@@ -3,7 +3,7 @@ require 'yaml'
 require 'pg'
 require 'base64'
 require 'logger'
-require 'daemons'
+require 'thread'
 
 module QueueProcessor
 
@@ -119,19 +119,58 @@ module QueueProcessor
 		end
 	end
 
+	# class for db connection pool used as a semaphore
+	class ConnectionPool
+		def initialize(queueid, db, maxnum)
+			@maxnum = maxnum
+			@pool = []
+			@lock = Mutex.new
+			@db = db
+			@queueid = queueid
+		end
+
+		def getconn
+			@lock.synchronize do
+				if @pool.length < @maxnum
+					@pool.push(
+						{
+							:conn => QueueProcessor::PGQueue.new(@queueid,@db ),
+							:status => :occupied 
+						}
+					)
+					return [@pool.length - 1, @pool.last[:conn]]
+				else
+					#lookup free
+					(0..@pool.length-1).each do |i|
+						if @pool[i][:status] == :free
+							@pool[i][:status] = :occupied
+							return[i,@pool[i][:conn]]
+						end
+					end
+					# no free connections
+					return nil
+				end
+			end
+		end
+
+		def releaseconn(i)
+			@lock.synchronize { @pool[i][:status] = :free }
+		end
+	end
+
 	# main class for queue processing
 	# - new( queue id, pq_db_settings )
 	# - put(hash) creates event
-	# - run( num_of_workers, num_of_elements_per_request, daemons_settings ) { |event| block for event processing }
+	# - run( num_of_workers, num_of_elements_per_request ) { |event| block for event processing }
 	# Example%
 	#     query = QueueProcessor::QueueProcessor.new(1,{ :dbname => 'queue_base'})
-	#     query.run(5,100,{ :ontop => true }) { |event| sleep(0.1);}
+	#     query.run(5,100) { |event| sleep(0.1);}
 
 	class PGQueueProcessor 
 		def initialize(queueid, db)
 			@db = db
 			@queueid = queueid
-			@mainconnection = PGQueue.new(queueid, db)
+			@mainconnection = PGQueue.new(@queueid, @db)
 		end
 
 		def put(data) 
@@ -140,24 +179,27 @@ module QueueProcessor
 			p "no connection #{$!}"
 		end
 
-		def run( workers = 1, frame = 100, daemons_attrs = {} )
-			Daemons.daemonize( daemons_attrs )
-			1.upto(workers) do |n|
-				Thread.new do
-					sleep(rand)
-					qp = PGQueue.new(@queueid,@db)
-					loop do
-						events = qp.getnext(frame)
-						sleep(1) if events && events.length == 0
-						if events
+		def run( workers = 1, frame = 100 )
+
+			connections = ConnectionPool.new(@queueid, @db, workers)
+						
+			loop do
+				(cid,qp) = connections.getconn
+				if cid
+					events = qp.getnext(frame)
+					Thread.new(events,cid,qp) do |events,cid,qp| 
+						begin
 							qp.process(events) do |event| 
 								yield event
 							end
+						ensure
+							connections.releaseconn(cid)
 						end
 					end
+				else
+					sleep(0.001)
 				end
 			end
-			Thread.list.each {|t| t.join unless t == Thread.main or t == Thread.current }
 		end
 	end
 end

@@ -32,5 +32,5 @@ Gem::Specification.new do |spec|
   spec.add_development_dependency 'pg'
   spec.add_development_dependency 'base64'
   spec.add_development_dependency 'logger'
-  spec.add_development_dependency 'daemons'
+  spec.add_development_dependency 'threads'
 end
