@@ -33,4 +33,6 @@ Gem::Specification.new do |spec|
   spec.add_development_dependency 'base64'
   spec.add_development_dependency 'logger'
   spec.add_development_dependency 'threads'
+  spec.add_development_dependency 'socket'
+  spec.add_development_dependency 'json'
 end
