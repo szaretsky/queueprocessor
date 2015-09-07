@@ -1,160 +1,51 @@
 require 'queueprocessor/version'
-require 'yaml'
-require 'pg'
-require 'base64'
+require 'queueprocessor/queue'
 require 'logger'
 require 'thread'
 require 'socket'
 require 'json'
 
-module QueueProcessor
+module PGQueueProcessor
 
-  class Event
-    attr_accessor :dbid, :data
-
-    def initialize( data = {} )
-      @data = data
-      @dbid = nil
+  # Processor settings
+  class PGQueueProcessorSettings
+    attr_accessor :queueid, :workers, :frame
+    def initialize( settings_hash )
+      @queueid = settings_hash[:queueid]
+      @workers = settings_hash[:workers]
+      @frame = settings_hash[:frame]
     end
 
-    def to_s 
-      @data.to_s 
+    def to_s
+      "#{@queueid}: #{@workers} * #{@frame}"
     end
 
-    def []( key ) 
-      @data[key] 
+    def merge( qps )
+      @workers = qps.workers.to_i
+      @frame = qps.frame.to_i
     end
-
-    # create safe string representation of event struct
-    def serialize 
-      Base64.encode64(@data.to_yaml) 
+  end
+    
+  class PGQueueProcessorSettingsHash
+    def initialize( settings_array=[] )
+      @settings = {}
+      settings_array.each {|record| record.instance_of?(PGQueueProcessorSettings) ? @settings[record.queueid] = record : @settings[record[:queueid].to_s] = PGQueueProcessorSettings.new(record) }
     end
     
-    # parse string representation of event
-    def deserialize( eventdata )
-      @data = YAML.load( Base64.decode64(eventdata) )
-      return self
+    def []( index )
+      @settings[index]
     end
-  end
-
-  class DBError < StandardError; end
-
-  class GenericQueue; end
-
-  class PGQueue < GenericQueue
-    # TODO error handling
-    # TODO sort
-
-    # event record statuses
-    EV_READY   = 1
-    EV_LOCKED   = 2
-    EV_PROCESSED   = 3
-
-    def status?
-      @conn && @conn.status == PG::CONNECTION_OK
+    
+    include Enumerable
+    def each
+      @settings.each_value {|record| yield record }
     end
 
-    def initialize( db = {} )
-      @connected  = false
-      @db = db
-      if self.connect && @conn.status == PG::CONNECTION_OK
-        @connected = true
-      else
-        raise DBError, "Bad connection status"
+    # QueueProcessorSettings as a parameter 
+    def merge( qps )
+      qps.map do |record|
+        @settings[record[:queueid]].merge(record.instance_of?(PGQueueProcessorSettings) ? record : PGQueueProcessorSettings.new( record )) if @settings[record[:queueid]]
       end
-    rescue
-      raise DBError, "Connection error " + $!.to_s
-    end
-
-    # get #{count} elements to process, locking them
-    def getnext( queueid, count = 1 )
-      events = []
-      @conn.transaction do |conn|
-        response = @conn.exec("select eventid, event from queue where queueid=#{queueid} and status=#{EV_READY} limit #{count} for update nowait"); 
-        response.each do |eventdata|
-          event = Event.new().deserialize( eventdata['event'] );
-          event.dbid = eventdata['eventid']
-          events.push( event )
-        end
-        @conn.exec("update queue set status=#{EV_LOCKED} where eventid in(#{ events.map{|event| event.dbid }.join(",")})") if events.length > 0
-      end
-      return events
-    rescue
-      p "Lock error "+ $!.to_s
-      false
-#      raise DBError, "Select error " + $!.to_s
-    end  
-      
-    # call processing for the given events list and release locks  
-    def process( events )
-      successfull = []
-      unsuccessfull = []
-      events.each do |event|  
-        begin
-          if yield event  
-            # should be commented to keep processed records
-#            @conn.exec("delete from queue where eventid=#{event.dbid}")
-            successfull.push( event.dbid )
-          else
-            unsuccessfull.push( event.dbid )
-          end
-        rescue
-          unsuccessfull.push( event.dbid )
-        end
-      end
-      @conn.exec("update queue set status=#{EV_PROCESSED} where eventid in (#{ successfull.join(?,) })") if successfull.length > 0
-      @conn.exec("update queue set status=#{EV_READY} where eventid in (#{ unsuccessfull.join(?,) })") if unsuccessfull.length > 0
-    end
-
-    # add QueueProcessor::Event to queue
-    def put( queueid, event )
-      if @connected 
-        res = @conn.exec("insert into queue (queueid, event, status ) values ( #{queueid}, '#{event.serialize}', #{EV_READY} )")
-      else
-        raise DBError, "Not connected"
-      end
-    end
-
-    def connect
-      @conn = PG::Connection.open( @db )
-    end
-  end
-
-  # class for db connection pool used as a semaphore
-  class DBConnectionPool
-    def initialize( db, maxnum)
-      @maxnum = maxnum
-      @pool = []
-      @lock = Mutex.new
-      @db = db
-    end
-
-    def getconn
-      @lock.synchronize do
-        if @pool.length < @maxnum
-          @pool.push(
-            {
-              :conn => QueueProcessor::PGQueue.new(@db ),
-              :status => :occupied 
-            }
-          )
-          return [@pool.length - 1, @pool.last[:conn]]
-        else
-          #lookup free
-          (0..@pool.length-1).each do |i|
-            if @pool[i][:status] == :free
-              @pool[i][:status] = :occupied
-              return[i,@pool[i][:conn]]
-            end
-          end
-          # no free connections
-          return nil
-        end
-      end
-    end
-
-    def releaseconn(i)
-      @lock.synchronize { @pool[i][:status] = :free }
     end
   end
 
@@ -169,59 +60,95 @@ module QueueProcessor
   #  run only workers
   #     query.workersrun()
 
+  class PGQueueProcessorStats
+    def initialize()
+      @stats = {}
+    end
+    
+    def to_s
+      @stats.to_s
+    end
+
+    def array
+      @stats
+    end
+
+    def [](queueid)
+      @stats[queueid] = { :workers => 0, :status => 'idle' } unless  @stats[queueid]
+      return @stats[queueid]
+    end
+  end
+
   class PGQueueProcessor 
     def initialize( settings, db )
       @db = db
-      @settings = settings
-      @mainconnection = PGQueue.new( @db)
-      @status = {}
+      @settings = PGQueueProcessorSettingsHash.new( settings )
+      @mainconnection = QueueS::PGQueue.new( @db )
+      @status = PGQueueProcessorStats.new 
       @lock = Mutex.new
       @need_to_restart = {}
-      @settings.each_pair do |queueid, qsettings| 
-        @status[queueid]={ :workers => 0, :status=> 'idle' }
-        @need_to_restart[queueid] = false
-      end
+      @logger = Logger.new(STDERR)
+      @logger.level = Logger::INFO
+      @logger.debug("QueueProcessor created...")
     end
 
     def put(queueid, data) 
-      @mainconnection.put(queueid, Event.new(data))
+      unless( @settings[queueid] )
+        raise "Unknown queue"
+      end
+      @mainconnection.put(queueid, QueueS::Event.new(data))
     rescue
-      p "no connection #{$!}"
+      @logger.error("No connection while put #{$!}")
     end
-  
+    
+    # runs workers and tcp server to control
+    def masterrun
+      self.workersrun 
+      self.serverrun 
+    end
+    
     def workersrun
-      @settings.each_key do |queueid|
+      @settings.each do |qsettings|
         Thread.new do 
+          @logger.debug("Thread for "+qsettings.to_s + " started")
           loop do
-            qsettings = @settings[queueid]
-            connections = DBConnectionPool.new( @db, qsettings[:workers])
-            @status[queueid][:workers] = qsettings[:workers]
+            connections = QueueS::DBConnectionPool.new( @db, qsettings.workers ) 
+            @status[qsettings.queueid][:workers] = qsettings.workers
             loop do
               (cid,qp) = connections.getconn
+              @logger.debug("Got connection "+ cid.to_s ) if cid
               # reread settings
               @lock.synchronize do
-                if @need_to_restart[queueid]
-                  @need_to_restart[queueid] = false
+                if @need_to_restart[qsettings.queueid]
+                  @logger.info("Threads for queue #{qsettings.queueid} need to be restarted. New settings #{qsettings} ")
+                  @need_to_restart[qsettings.queueid] = false
                   break # restart queue processing
                 end
               end
               if cid
-                events = qp.getnext(queueid, qsettings[:frame])
+                events = qp.getnext( qsettings.queueid , qsettings.frame)
+                @logger.info("Queue "+ qsettings.queueid.to_s  + " got " + events.length.to_s + " events")
                 if( events.length > 0 )
-                  @status[queueid][:status] = 'working'
+                  @status[qsettings.queueid][:status] = 'working'
                   Thread.new(events,cid,qp) do |events,cid,qp| 
+                    starttime = Time.now()
+                    process_stats = QueueS::ProcessStats.new()
                     begin
-                      qp.process(events) do |event| 
-                        sleep(0.001)
+                      qp.process(events, process_stats) do |event| 
+                        sleep(0.0001)
                       end
                     ensure
+                      @logger.error("Procesing error #{$!}") if $!
+                      @logger.info("Processed " + process_stats.to_s )
+                      @logger.debug("Release connection "+ cid.to_s )
                       connections.releaseconn(cid)
                     end
                   end
                 else
-                  @status[queueid][:status] = 'idle'
+                  @status[qsettings.queueid][:status] = 'idle'
+                  @logger.debug("Release connection "+ cid.to_s )
                   connections.releaseconn(cid)
-                  sleep(0.001)
+                  sleep(1)
                 end
               else
                 sleep(0.001)
@@ -232,13 +159,7 @@ module QueueProcessor
       end
     end
 
-    # runs workers and tcp server to control
-    def masterrun
-      self.workersrun 
-      self.serverrun 
-    end
-    
-    # tcp server
+    # tcp server for control
     # commands:
     #   reconfigure: { set: [ { queueid: qid, workers: new_val, frame: new_val } ]}
     #  get stats: { get: stats }
@@ -249,18 +170,16 @@ module QueueProcessor
           socket = server.accept_nonblock
           if socket 
             request = socket.gets
-p request
             req_hash = JSON.parse( request )
             if( req_hash['set'] )
               req_hash['set'].each do |rec|
-                @settings[res['queueid']][:workers] = res['workers']
-                @settings[res['queueid']][:frame] = res['frame']
-		@need_to_restart[res['queueid']] = true
+                @settings[rec['queueid']].merge( PGQueueProcessorSettings.new( { :queueid => rec['queueid'], :workers => rec['workers'], :frame => rec['frame']}  ))
+		            @need_to_restart[rec['queueid'].to_i] = true
               end
             end
             response = "OK"
             if( req_hash['get'] == 'stats' )
-              response = JSON.generate( @status )
+              response = JSON.generate( @status.array )
             end
             socket.print "HTTP/1.1 200 OK\r\n" +
               "Content-Type: text/plain\r\n" +
@@ -269,9 +188,9 @@ p request
             socket.close
           end
         rescue IO::WaitReadable
-          sleep 0.1
+          sleep(0.1)
         rescue 
-          p "tcp server error #{$!}"
+          @log.error("tcp server error #{$!}")
         end
       end
     end
