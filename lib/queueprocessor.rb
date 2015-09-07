@@ -190,7 +190,7 @@ module PGQueueProcessor
         rescue IO::WaitReadable
           sleep(0.1)
         rescue 
-          @log.error("tcp server error #{$!}")
+          @logger.error("tcp server error #{$!}")
         end
       end
     end

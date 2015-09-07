@@ -72,13 +72,13 @@ module QueueS
     def getnext( queueid, count = 1 )
       events = []
       @conn.transaction do |conn|
-        response = @conn.exec("select eventid, event from queue where queueid=#{queueid} and status=#{EV_READY} limit #{count} for update nowait"); 
+        response = @conn.exec("select eventid, event from queues where queueid=#{queueid} and status=#{EV_READY} limit #{count} for update nowait"); 
         response.each do |eventdata|
           event = Event.new().deserialize( eventdata['event'] );
           event.dbid = eventdata['eventid']
           events.push( event )
         end
-        @conn.exec("update queue set status=#{EV_LOCKED} where eventid in(#{ events.map{|event| event.dbid }.join(",")})") if events.length > 0
+        @conn.exec("update queues set status=#{EV_LOCKED} where eventid in(#{ events.map{|event| event.dbid }.join(",")})") if events.length > 0
       end
       return events
     rescue
@@ -105,15 +105,15 @@ module QueueS
           unsuccessfull.push( event.dbid )
         end
       end
-      @conn.exec("update queue set status=#{EV_PROCESSED} where eventid in (#{ successfull.join(?,) })") if successfull.length > 0
-      @conn.exec("update queue set status=#{EV_READY} where eventid in (#{ unsuccessfull.join(?,) })") if unsuccessfull.length > 0
+      @conn.exec("update queues set status=#{EV_PROCESSED} where eventid in (#{ successfull.join(?,) })") if successfull.length > 0
+      @conn.exec("update queues set status=#{EV_READY} where eventid in (#{ unsuccessfull.join(?,) })") if unsuccessfull.length > 0
       process_stat.finish( successfull.length, unsuccessfull.length )
     end
 
     # add QueueProcessor::Event to queue
     def put( queueid, event )
       if @connected 
-        res = @conn.exec("insert into queue (queueid, event, status ) values ( #{queueid}, '#{event.serialize}', #{EV_READY} )")
+        res = @conn.exec("insert into queues (queueid, event, status ) values ( #{queueid}, '#{event.serialize}', #{EV_READY} )")
       else
         raise DBError, "Not connected"
       end
