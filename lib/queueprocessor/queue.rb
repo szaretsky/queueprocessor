@@ -88,7 +88,7 @@ module QueueS
     end  
       
     # call processing for the given events list and release locks  
-    def process( events, process_stat )
+    def process( events, process_stat, settings = { :keep_processed => true} )
       successfull = []
       unsuccessfull = []
       process_stat.start( events.length )
@@ -96,7 +96,7 @@ module QueueS
         begin
           if yield event  
             # should be commented to keep processed records
-#            @conn.exec("delete from queue where eventid=#{event.dbid}")
+            @conn.exec("delete from queues where eventid=#{event.dbid}") unless settings[:keep_processed]
             successfull.push( event.dbid )
           else
             unsuccessfull.push( event.dbid )
@@ -105,7 +105,7 @@ module QueueS
           unsuccessfull.push( event.dbid )
         end
       end
-      @conn.exec("update queues set status=#{EV_PROCESSED} where eventid in (#{ successfull.join(?,) })") if successfull.length > 0
+      @conn.exec("update queues set status=#{EV_PROCESSED} where eventid in (#{ successfull.join(?,) })") if (successfull.length > 0 ) && settings[:keep_processed]
       @conn.exec("update queues set status=#{EV_READY} where eventid in (#{ unsuccessfull.join(?,) })") if unsuccessfull.length > 0
       process_stat.finish( successfull.length, unsuccessfull.length )
     end
@@ -163,6 +163,7 @@ module QueueS
   end
 
   class ProcessStats
+    attr_accessor :eps
     def initialize
       @succ = 0     #successful
       @unsucc = 0   #unsuccessful

@@ -9,11 +9,12 @@ module PGQueueProcessor
 
   # Processor settings
   class PGQueueProcessorSettings
-    attr_accessor :queueid, :workers, :frame
+    attr_accessor :queueid, :workers, :frame, :handler
     def initialize( settings_hash )
       @queueid = settings_hash[:queueid]
       @workers = settings_hash[:workers]
       @frame = settings_hash[:frame]
+      @handler = settings_hash[:handler]
     end
 
     def to_s
@@ -21,8 +22,8 @@ module PGQueueProcessor
     end
 
     def merge( qps )
-      @workers = qps.workers.to_i
-      @frame = qps.frame.to_i
+      @workers = qps.workers.to_i if qps.workers
+      @frame = qps.frame.to_i if qps.frame
     end
   end
     
@@ -70,7 +71,7 @@ module PGQueueProcessor
     end
 
     def array
-      @stats
+      @stats.map{|k,v| v['queueid'] = k; v }
     end
 
     def [](queueid)
@@ -87,16 +88,16 @@ module PGQueueProcessor
       @status = PGQueueProcessorStats.new 
       @lock = Mutex.new
       @need_to_restart = {}
-      @logger = Logger.new(STDERR)
+      @logger = Logger.new(STDOUT)
       @logger.level = Logger::INFO
       @logger.debug("QueueProcessor created...")
     end
 
-    def put(queueid, data) 
+    def put(queueid, data, connection = @mainconnection) 
       unless( @settings[queueid] )
         raise "Unknown queue"
       end
-      @mainconnection.put(queueid, QueueS::Event.new(data))
+      connection.put(queueid, QueueS::Event.new(data))
     rescue
       @logger.error("No connection while put #{$!}")
     end
@@ -110,37 +111,48 @@ module PGQueueProcessor
     def workersrun
       @settings.each do |qsettings|
         Thread.new do 
-          @logger.debug("Thread for "+qsettings.to_s + " started")
           loop do
-            connections = QueueS::DBConnectionPool.new( @db, qsettings.workers ) 
+            begin
+            @logger.info("Thread for "+qsettings.to_s + " started")
+            begin
+              connections = QueueS::DBConnectionPool.new( @db, qsettings.workers ) 
+            rescue
+              @logger.error("can not get connections #{$!}")
+              sleep(1)
+              break
+            end
             @status[qsettings.queueid][:workers] = qsettings.workers
             loop do
               (cid,qp) = connections.getconn
               @logger.debug("Got connection "+ cid.to_s ) if cid
               # reread settings
-              @lock.synchronize do
-                if @need_to_restart[qsettings.queueid]
-                  @logger.info("Threads for queue #{qsettings.queueid} need to be restarted. New settings #{qsettings} ")
-                  @need_to_restart[qsettings.queueid] = false
-                  break # restart queue processing
-                end
+              if @need_to_restart[qsettings.queueid]
+                @logger.info("Threads for queue #{qsettings.queueid} need to be restarted. New settings #{qsettings} ")
+                @need_to_restart[qsettings.queueid] = false
+                break # restart queue processing
               end
               if cid
                 events = qp.getnext( qsettings.queueid , qsettings.frame)
-                @logger.info("Queue "+ qsettings.queueid.to_s  + " got " + events.length.to_s + " events")
+                @logger.info("Queue "+ qsettings.queueid.to_s  + " got " + events.length.to_s + " events") if events.length > 0
                 if( events.length > 0 )
                   @status[qsettings.queueid][:status] = 'working'
                   Thread.new(events,cid,qp) do |events,cid,qp| 
                     starttime = Time.now()
                     process_stats = QueueS::ProcessStats.new()
                     begin
-                      qp.process(events, process_stats) do |event| 
-                        sleep(0.0001)
+                      qp.process(events, process_stats, {:keep_processed => false }) do |event| 
+                        begin
+                          qsettings.handler.call(event, self, qp)
+                        rescue
+                          @logger.error("error while processing event #{event}")
+                          false
+                        end
                       end
                     ensure
                       @logger.error("Procesing error #{$!}") if $!
                       @logger.info("Processed " + process_stats.to_s )
                       @logger.debug("Release connection "+ cid.to_s )
+                      @status[qsettings.queueid][:eps] = process_stats.eps
                       connections.releaseconn(cid)
                     end
                   end
@@ -154,6 +166,10 @@ module PGQueueProcessor
                 sleep(0.001)
               end
             end
+          rescue
+            @logger.error("main queue loop error #{$!}")
+            sleep(1)
+          end
           end
         end
       end
@@ -165,10 +181,13 @@ module PGQueueProcessor
     #  get stats: { get: stats }
     def serverrun
       server = TCPServer.new('localhost', 2345)
+      @logger.info("tcp server starts")
       loop do
         begin
           socket = server.accept_nonblock
           if socket 
+            #TODO use read instead of gets
+            until (res=socket.gets) == "\r\n" do end
             request = socket.gets
             req_hash = JSON.parse( request )
             if( req_hash['set'] )
@@ -182,7 +201,7 @@ module PGQueueProcessor
               response = JSON.generate( @status.array )
             end
             socket.print "HTTP/1.1 200 OK\r\n" +
-              "Content-Type: text/plain\r\n" +
+              "Content-Type: text/json\r\n" +
               "Content-Length: #{response.bytesize}\r\n" +
               "Connection: close\r\n\r\n#{response}"
             socket.close
@@ -190,8 +209,16 @@ module PGQueueProcessor
         rescue IO::WaitReadable
           sleep(0.1)
         rescue 
-          @logger.error("tcp server error #{$!}")
+          @logger.error("tcp server error #{$!}") 
+          @logger.error("try again") 
+          sleep(1) 
         end
+      end
+    rescue 
+      @logger.error("tcp server can not start #{$!}")
+      @logger.info("runnning main loop without control server")
+      loop do
+        sleep(1)
       end
     end
     
