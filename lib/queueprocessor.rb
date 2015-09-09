@@ -88,7 +88,7 @@ module PGQueueProcessor
       @status = PGQueueProcessorStats.new 
       @lock = Mutex.new
       @need_to_restart = {}
-      @logger = Logger.new(STDOUT)
+      @logger = Logger.new(STDERR)
       @logger.level = Logger::INFO
       @logger.debug("QueueProcessor created...")
     end
