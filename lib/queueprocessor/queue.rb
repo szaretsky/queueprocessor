@@ -59,7 +59,7 @@ module QueueS
     def initialize( db = {} )
       @connected  = false
       @db = db
-      if self.connect && @conn.status == PG::CONNECTION_OK
+      if self.connect && ( @conn.status == PG::CONNECTION_OK || @conn.status == PG::PGRES_POLLING_OK )
         @connected = true
       else
         raise DBError, "Bad connection status"
@@ -120,7 +120,21 @@ module QueueS
     end
 
     def connect
-      @conn = PG::Connection.open( @db )
+      if @db[:connstr]
+        @conn = PG::Connection.connect_start( @db[:connstr] )
+        status = @conn.connect_poll
+        start = Time.now
+        while(status != PG::PGRES_POLLING_OK) do
+          sleep(0.01)
+          status = @conn.connect_poll
+          if (Time.now - start) > 10
+            raise DBError, "Connection timeout"
+          end
+        end
+      else
+        @conn = PG::Connection.open( @db )
+      end
+      @conn
     end
   end
 
