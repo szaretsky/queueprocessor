@@ -22,7 +22,33 @@ Or install it yourself as:
 
 ## Usage
 
-TODO: Write usage instructions here
+As an example:
+
+Two queues that put event to other. The first one also fails some of them.
+
+require 'queueprocessor'
+
+f1 = lambda do |event,qp,conn|
+  qp.put("2","Event #{event.dbid}/#{rand}", conn)
+  sleep(0.1);
+  0/rand(10).round
+end
+
+f2 = lambda do |event,qp,conn|
+  qp.put("1","Event #{event.dbid}/#{rand}", conn)
+  sleep(0.1);
+end
+
+qp = PGQueueProcessor::PGQueueProcessor.new(
+  [
+    {:queueid => 1, :workers => 2, :frame => 100, :handler => f1 },
+    {:queueid => 2, :workers => 3, :frame => 100, :handler => f2 }
+  ],{ :dbname => 'queues_development'})
+qp.masterrun
+
+_________________
+
+20000.times { |n| qp.put("1","Event #{n}/#{rand}") }
 
 ## Development
 
