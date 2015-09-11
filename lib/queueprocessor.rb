@@ -202,13 +202,13 @@ module PGQueueProcessor
             if( req_hash['get'] == 'stats' )
               response = JSON.generate( @status.array )
             end
-            logger.info("response prepaired for: #{ Time.now-timer }")
+            @logger.info("response prepaired for: #{ Time.now-timer }")
             socket.print "HTTP/1.1 200 OK\r\n" +
               "Content-Type: text/json\r\n" +
               "Content-Length: #{response.bytesize}\r\n" +
               "Connection: close\r\n\r\n#{response}"
             socket.close
-            logger.info("response sent for: #{ Time.now-timer }")
+            @logger.info("response sent for: #{ Time.now-timer }")
           end
         rescue IO::WaitReadable
           sleep(0.0001)
