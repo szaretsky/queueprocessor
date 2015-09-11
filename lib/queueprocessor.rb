@@ -181,11 +181,13 @@ module PGQueueProcessor
     #  get stats: { get: stats }
     def serverrun
       server = TCPServer.new('localhost', 2345)
+      timer = 0
       @logger.info("tcp server starts")
       loop do
         begin
           socket = server.accept_nonblock
           if socket 
+            timer = Time.now
             #TODO use read instead of gets
             until (res=socket.gets) == "\r\n" do end
             request = socket.gets
@@ -200,14 +202,16 @@ module PGQueueProcessor
             if( req_hash['get'] == 'stats' )
               response = JSON.generate( @status.array )
             end
+            logger.info("response prepaired for: #{ Time.now-timer }")
             socket.print "HTTP/1.1 200 OK\r\n" +
               "Content-Type: text/json\r\n" +
               "Content-Length: #{response.bytesize}\r\n" +
               "Connection: close\r\n\r\n#{response}"
             socket.close
+            logger.info("response sent for: #{ Time.now-timer }")
           end
         rescue IO::WaitReadable
-          sleep(0.1)
+          sleep(0.0001)
         rescue 
           @logger.error("tcp server error #{$!}") 
           @logger.error("try again") 
