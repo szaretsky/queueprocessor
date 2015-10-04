@@ -1,31 +1,11 @@
 # Queueprocessor
+Queue processor with broker. Also contains built-in http server for control and statistics.
 
-Welcome to your new gem! In this directory, you'll find the files you need to be able to package up your Ruby library into a gem. Put your Ruby code in the file `lib/queueprocessor`. To experiment with that code, run `bin/console` for an interactive prompt.
-
-TODO: Delete this and the text above, and describe your gem
-
-## Installation
-
-Add this line to your application's Gemfile:
-
-```ruby
-gem 'queueprocessor'
-```
-
-And then execute:
-
-    $ bundle
-
-Or install it yourself as:
-
-    $ gem install queueprocessor
-
-## Usage
-
-As an example:
+## Example
 
 Two queues that put event to other. The first one also fails some of them.
 
+```ruby
 require 'queueprocessor'
 
 f1 = lambda do |event,qp,conn|
@@ -46,9 +26,9 @@ qp = PGQueueProcessor::PGQueueProcessor.new(
   ],{ :dbname => 'queues_development'})
 qp.masterrun
 
-_________________
 
 20000.times { |n| qp.put("1","Event #{n}/#{rand}") }
+```
 
 ## Development
 
